@@ -1,140 +1,189 @@
+"""TRLP 0.2: editor orientado, sem declarar conformidade jurídica automática."""
 import io
 import json
 import re
 import zipfile
-from datetime import datetime
+from pathlib import Path
 from xml.etree import ElementTree as ET
 
 import streamlit as st
 from docx import Document
 from docx.shared import Cm, Pt
 
-st.set_page_config(page_title='TR | Secretaria de Obras', page_icon='📄', layout='wide')
-st.title('Termos de Referência | Secretaria de Obras')
-st.caption('Versão 0.1 • Inventário do modelo e protótipo de preenchimento. Não gera TR validado para licitação.')
-
+st.set_page_config(page_title="TRLP | Termos de Referência", page_icon="📄", layout="wide")
 CAPITULOS = [
-    ('1', 'OBJETO'),
-    ('2', 'JUSTIFICATIVA E OBJETIVO DA CONTRATAÇÃO'),
-    ('3', 'DESCRIÇÃO DA SOLUÇÃO COMO UM TODO'),
-    ('4', 'REQUISITOS DA CONTRATAÇÃO'),
-    ('5', 'FORMA DE EXECUÇÃO DO OBJETO'),
-    ('6', 'GESTÃO DO CONTRATO'),
-    ('7', 'MEDIÇÃO E PAGAMENTO'),
-    ('8', 'SELEÇÃO DO FORNECEDOR'),
-    ('9', 'ESTIMATIVA DO PREÇO'),
-    ('10', 'ADEQUAÇÃO ORÇAMENTÁRIA'),
-    ('11', 'DISPOSIÇÕES FINAIS'),
+    ("1", "OBJETO"), ("2", "JUSTIFICATIVA E OBJETIVO DA CONTRATAÇÃO"),
+    ("3", "DESCRIÇÃO DA SOLUÇÃO COMO UM TODO"), ("4", "REQUISITOS DA CONTRATAÇÃO"),
+    ("5", "FORMA DE EXECUÇÃO DO OBJETO"), ("6", "GESTÃO DO CONTRATO"),
+    ("7", "MEDIÇÃO E PAGAMENTO"), ("8", "SELEÇÃO DO FORNECEDOR"),
+    ("9", "ESTIMATIVA DO PREÇO"), ("10", "ADEQUAÇÃO ORÇAMENTÁRIA"),
+    ("11", "DISPOSIÇÕES FINAIS"),
 ]
+MODELO = Path(__file__).with_name("modelo_tr.odt")
+NS_TEXT = "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}"
+NS_OFFICE = "{urn:oasis:names:tc:opendocument:xmlns:office:1.0}"
 
 @st.cache_data
-def ler_odt(bytes_arquivo):
-    with zipfile.ZipFile(io.BytesIO(bytes_arquivo)) as arq:
-        xml = ET.fromstring(arq.read('content.xml'))
-    ns = {'text': 'urn:oasis:names:tc:opendocument:xmlns:text:1.0'}
-    corpo = xml.find('.//{urn:oasis:names:tc:opendocument:xmlns:office:1.0}body')
-    linhas = []
+
+def extrair_paragrafos(conteudo):
+    """Lê somente parágrafos do corpo, sem comentários/anotações ODT."""
+    with zipfile.ZipFile(io.BytesIO(conteudo)) as pacote:
+        raiz = ET.fromstring(pacote.read("content.xml"))
+    corpo = raiz.find(f".//{NS_OFFICE}body/{NS_OFFICE}text")
+    if corpo is None:
+        return []
+    resultado = []
     for el in corpo.iter():
-        if el.tag in ('{urn:oasis:names:tc:opendocument:xmlns:text:1.0}p',
-                      '{urn:oasis:names:tc:opendocument:xmlns:text:1.0}h'):
-            texto = ''.join(el.itertext()).strip()
-            if texto:
-                linhas.append(texto)
-    return linhas
+        if el.tag not in (NS_TEXT + "p", NS_TEXT + "h"):
+            continue
+        if any(p.tag == NS_OFFICE + "annotation" for p in el.iter()):
+            # Comentários podem estar dentro de parágrafos: extrair somente conteúdo fora deles.
+            pass
+        partes = []
+        def coletar(no):
+            if no.tag == NS_OFFICE + "annotation":
+                return
+            if no.text:
+                partes.append(no.text)
+            for filho in no:
+                coletar(filho)
+                if filho.tail:
+                    partes.append(filho.tail)
+        coletar(el)
+        texto = " ".join("".join(partes).split())
+        if texto:
+            resultado.append(texto)
+    return resultado
 
-st.sidebar.header('Modelo de referência')
-modelo = st.sidebar.file_uploader('Selecione o modelo oficial (.odt)', type=['odt'])
-st.sidebar.info('Use o arquivo original da Prefeitura. Exemplos de contratações anteriores não são textos obrigatórios.')
+@st.cache_data
 
-if 'dados' not in st.session_state:
-    st.session_state.dados = {}
-if 'classificacoes' not in st.session_state:
-    st.session_state.classificacoes = {}
+def capitulos_do_modelo(conteudo):
+    linhas = extrair_paragrafos(conteudo)
+    blocos = {num: [] for num, _ in CAPITULOS}
+    atual = None
+    for linha in linhas:
+        titulo = next((num for num, nome in CAPITULOS if re.match(rf"^{num}\.\s+{re.escape(nome)}\s*$", linha, re.I)), None)
+        if titulo:
+            atual = titulo
+            continue
+        if atual:
+            blocos[atual].append(linha)
+    return blocos
 
-aba1, aba2, aba3 = st.tabs(['1. Inventário do modelo', '2. Preenchimento experimental', '3. Conferência e exportação'])
 
+def inicial():
+    return {"unidade": "Secretaria de Obras e Infraestrutura", "responsavel": "",
+            "natureza": "Obra de engenharia", "regime": "Não definido", "objeto": "",
+            "capitulos": {n: "" for n, _ in CAPITULOS},
+            "alteracoes": {n: "" for n, _ in CAPITULOS}}
+
+if "projeto" not in st.session_state:
+    st.session_state.projeto = inicial()
+
+st.title("TRLP | Elaboração de Termos de Referência")
+st.caption("Versão 0.2 • Editor orientado e rascunho editável. Não substitui a conferência técnica, administrativa ou jurídica.")
+
+if MODELO.is_file():
+    modelo_bytes = MODELO.read_bytes()
+    blocos = capitulos_do_modelo(modelo_bytes)
+    st.sidebar.success("Modelo de referência carregado do repositório.")
+else:
+    blocos = {n: [] for n, _ in CAPITULOS}
+    st.sidebar.error("Arquivo modelo_tr.odt não encontrado na raiz do repositório.")
+
+st.sidebar.info("O modelo é exemplificativo. Não transfira objetos, valores, prazos ou dados de contratações anteriores para o novo TR.")
+importado = st.sidebar.file_uploader("Retomar trabalho salvo (.json)", type="json")
+if importado is not None:
+    try:
+        candidato = json.loads(importado.getvalue().decode("utf-8"))
+        if not isinstance(candidato, dict) or candidato.get("formato") != "TRLP-0.2":
+            st.sidebar.error("Arquivo incompatível com a versão 0.2.")
+        elif st.sidebar.button("Confirmar importação"):
+            dados = candidato.get("dados", {})
+            base = inicial()
+            for k in ("unidade", "responsavel", "natureza", "regime", "objeto"):
+                if isinstance(dados.get(k), str):
+                    base[k] = dados[k]
+            for grupo in ("capitulos", "alteracoes"):
+                if isinstance(dados.get(grupo), dict):
+                    for n, _ in CAPITULOS:
+                        if isinstance(dados[grupo].get(n), str):
+                            base[grupo][n] = dados[grupo][n]
+            st.session_state.projeto = base
+            st.rerun()
+    except (UnicodeError, ValueError):
+        st.sidebar.error("Não foi possível ler o JSON.")
+
+p = st.session_state.projeto
+aba1, aba2, aba3 = st.tabs(["1. Dados da contratação", "2. Redação por capítulo", "3. Conferência e exportação"])
 with aba1:
-    st.subheader('Classificar antes de automatizar')
-    st.write('Cada parágrafo do modelo deve ser classificado. Nenhuma cláusula será considerada obrigatória apenas por constar no exemplo.')
-    if modelo:
-        linhas = ler_odt(modelo.getvalue())
-        st.success(f'{len(linhas)} blocos de texto identificados no ODT. A classificação é manual nesta primeira versão.')
-        busca = st.text_input('Filtrar texto do modelo', placeholder='Ex.: 5.1.1, subcontratação, pagamento')
-        opcoes = ['Não analisado', 'Texto padronizado', 'Campo variável', 'Instrução de preenchimento', 'Exemplo específico (ignorar)', 'Alternativa condicional', 'Exige decisão técnica', 'Revisão do modelo necessária']
-        filtrados = [(i, s) for i, s in enumerate(linhas) if not busca or busca.casefold() in s.casefold()]
-        st.caption(f'{len(filtrados)} blocos exibidos. Para modelos longos, filtre por número do item.')
-        for i, texto in filtrados[:70]:
-            with st.expander(f'Bloco {i+1}: {texto[:105]}'):
-                chave = str(i)
-                anterior = st.session_state.classificacoes.get(chave, 'Não analisado')
-                valor = st.selectbox('Classificação', opcoes, index=opcoes.index(anterior), key=f'classe_{i}')
-                st.session_state.classificacoes[chave] = valor
-                st.write(texto)
-        if len(filtrados) > 70:
-            st.warning('Exibindo os primeiros 70 resultados. Refine a busca para visualizar os demais.')
-        inventario = [{'indice': i+1, 'texto': s, 'classificacao': st.session_state.classificacoes.get(str(i), 'Não analisado')} for i, s in enumerate(linhas)]
-        st.download_button('Baixar inventário em JSON', json.dumps(inventario, ensure_ascii=False, indent=2).encode('utf-8'), 'inventario_modelo_tr.json', 'application/json')
-    else:
-        st.warning('Carregue o arquivo ODT na barra lateral para iniciar a classificação.')
+    st.subheader("Identificação da contratação")
+    p["unidade"] = st.text_input("Unidade solicitante", value=p["unidade"])
+    p["responsavel"] = st.text_input("Responsável pela elaboração", value=p["responsavel"])
+    p["natureza"] = st.selectbox("Natureza", ["Obra de engenharia", "Serviço de engenharia", "Outro (requer adequação do modelo)"], index=["Obra de engenharia", "Serviço de engenharia", "Outro (requer adequação do modelo)"].index(p["natureza"]) if p["natureza"] in ["Obra de engenharia", "Serviço de engenharia", "Outro (requer adequação do modelo)"] else 0)
+    regimes = ["Não definido", "Empreitada por preço global", "Empreitada por preço unitário", "Tarefa"]
+    p["regime"] = st.selectbox("Regime de execução", regimes, index=regimes.index(p["regime"]) if p["regime"] in regimes else 0)
+    p["objeto"] = st.text_area("Descrição resumida do objeto da contratação atual", value=p["objeto"], height=100)
+    st.info("A seleção de regime não insere automaticamente as cláusulas exemplificativas do item 5.1. O texto deverá ser adaptado e justificado tecnicamente.")
 
 with aba2:
-    st.subheader('Rascunho técnico orientado')
-    st.warning('Os campos abaixo são experimentais. A redação e as regras de cada item ainda serão definidas a partir do inventário completo.')
-    unidade = st.text_input('Unidade solicitante', value=st.session_state.dados.get('unidade', 'Secretaria de Obras e Infraestrutura'))
-    responsavel = st.text_input('Responsável pela elaboração', value=st.session_state.dados.get('responsavel', ''))
-    tipo = st.selectbox('Natureza', ['Obra de engenharia', 'Serviço de engenharia', 'Outro (requer revisão do modelo)'])
-    regime = st.selectbox('Regime de execução (a justificar)', ['Não definido', 'Empreitada por preço global', 'Empreitada por preço unitário', 'Tarefa'])
-    st.session_state.dados.update({'unidade': unidade, 'responsavel': responsavel, 'tipo': tipo, 'regime': regime})
-    for num, titulo in CAPITULOS:
-        with st.expander(f'{num}. {titulo}', expanded=(num == '1')):
-            st.caption('Insira somente as informações da contratação atual. Não copie exemplos do modelo.')
-            campo = f'capitulo_{num}'
-            st.session_state.dados[campo] = st.text_area('Conteúdo técnico preliminar', value=st.session_state.dados.get(campo, ''), height=150, key=f'entrada_{num}')
+    st.subheader("Redação orientada por capítulos")
+    st.write("À esquerda, consulte o texto do modelo como **referência**. À direita, redija o texto que realmente integrará o novo TR. Nenhum exemplo será copiado automaticamente.")
+    escolha = st.selectbox("Capítulo", [n for n, _ in CAPITULOS], format_func=lambda n: f"{n}. {dict(CAPITULOS)[n]}")
+    esq, dir = st.columns([1, 1], gap="large")
+    with esq:
+        st.markdown("**Modelo municipal: referência de leitura**")
+        st.caption("Pode conter orientações, alternativas e exemplos de outras contratações.")
+        referencia = "\n\n".join(blocos.get(escolha, []))
+        st.text_area("Trechos originais (somente leitura)", value=referencia or "Capítulo não identificado no ODT.", height=460, disabled=True)
+    with dir:
+        st.markdown("**Texto para o TR atual**")
+        p["capitulos"][escolha] = st.text_area("Redação do capítulo", value=p["capitulos"][escolha], height=360, key=f"texto_{escolha}", placeholder="Digite a redação completa com os subitens aplicáveis e sua numeração original.")
+        p["alteracoes"][escolha] = st.text_area("Observações/justificativas de adaptações (não entram no TR)", value=p["alteracoes"][escolha], height=90, key=f"just_{escolha}")
+        st.caption("O editor permite adaptações, mas ainda não comprova automaticamente que todos os subitens foram contemplados.")
 
 with aba3:
-    st.subheader('Conferência preliminar')
-    dados = st.session_state.dados
+    st.subheader("Conferência preliminar")
     pendencias = []
-    if not dados.get('unidade', '').strip():
-        pendencias.append('Unidade solicitante não informada.')
-    if not dados.get('responsavel', '').strip():
-        pendencias.append('Responsável pela elaboração não informado.')
-    if dados.get('regime') == 'Não definido':
-        pendencias.append('Regime de execução ainda não definido.')
+    for campo, rotulo in (("unidade", "Unidade solicitante"), ("responsavel", "Responsável"), ("objeto", "Objeto")):
+        if not p[campo].strip():
+            pendencias.append(f"{rotulo} não informado.")
+    if p["regime"] == "Não definido":
+        pendencias.append("Regime de execução não definido.")
     for num, titulo in CAPITULOS:
-        if not dados.get(f'capitulo_{num}', '').strip():
-            pendencias.append(f'Capítulo {num} sem conteúdo técnico.')
+        if not p["capitulos"][num].strip():
+            pendencias.append(f"Capítulo {num} ({titulo}) sem redação.")
     if pendencias:
-        st.error(f'{len(pendencias)} pendência(s) de preenchimento detectada(s).')
+        st.warning(f"{len(pendencias)} pendência(s) preliminar(es).")
         for item in pendencias:
-            st.write('• ' + item)
+            st.write("• " + item)
     else:
-        st.success('Todos os campos preliminares estão preenchidos. Isso NÃO significa conformidade com o modelo ou com a legislação.')
-    st.info('A validação de textos oficiais, subitens, escolhas condicionais, referências cruzadas e compatibilidade jurídica será incorporada após a classificação integral do modelo.')
+        st.success("Campos principais preenchidos. Isso não equivale à aprovação do TR.")
+    st.error("Ainda não implementado: conferência integral de subitens, cláusulas condicionais, textos padronizados e conformidade legal. O arquivo é apenas um rascunho.")
+
     doc = Document()
     sec = doc.sections[0]
-    sec.top_margin = Cm(2.5)
-    sec.bottom_margin = Cm(2.5)
-    sec.left_margin = Cm(3)
-    sec.right_margin = Cm(2)
-    normal = doc.styles['Normal']
-    normal.font.name = 'Liberation Serif'
-    normal.font.size = Pt(11)
-    doc.add_heading('RASCUNHO PRELIMINAR DE TERMO DE REFERÊNCIA', 0)
-    doc.add_paragraph('Documento de trabalho. Não utilizar como TR final sem revisão e adequação ao modelo municipal.')
-    doc.add_paragraph('UNIDADE SOLICITANTE: ' + dados.get('unidade', ''))
-    doc.add_paragraph('RESPONSÁVEL: ' + dados.get('responsavel', ''))
-    doc.add_paragraph('NATUREZA: ' + dados.get('tipo', ''))
-    doc.add_paragraph('REGIME INDICADO: ' + dados.get('regime', ''))
+    sec.top_margin, sec.bottom_margin = Cm(2.5), Cm(2.5)
+    sec.left_margin, sec.right_margin = Cm(3), Cm(2)
+    estilo = doc.styles["Normal"]
+    estilo.font.name, estilo.font.size = "Liberation Serif", Pt(11)
+    doc.add_heading("RASCUNHO DE TERMO DE REFERÊNCIA", 0)
+    doc.add_paragraph("Documento preliminar. Conferir integralmente com o modelo municipal antes de encaminhar para licitação.")
+    doc.add_paragraph("UNIDADE SOLICITANTE: " + p["unidade"])
+    doc.add_paragraph("RESPONSÁVEL PELA ELABORAÇÃO: " + p["responsavel"])
+    doc.add_paragraph("OBJETO: " + p["objeto"])
     for num, titulo in CAPITULOS:
-        doc.add_heading(f'{num}. {titulo}', level=1)
-        texto = dados.get(f'capitulo_{num}', '')
-        for paragrafo in texto.split('\n'):
-            if paragrafo.strip():
-                doc.add_paragraph(paragrafo.strip())
-        if not texto.strip():
-            doc.add_paragraph('[PENDENTE DE PREENCHIMENTO]')
-    saida = io.BytesIO()
-    doc.save(saida)
-    st.download_button('Baixar rascunho DOCX', saida.getvalue(), 'rascunho_tr_nao_validado.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
-    st.download_button('Salvar respostas em JSON', json.dumps(dados, ensure_ascii=False, indent=2).encode('utf-8'), 'respostas_tr.json', 'application/json')
+        doc.add_heading(f"{num}. {titulo}", level=1)
+        texto = p["capitulos"][num].strip()
+        if texto:
+            for linha in texto.splitlines():
+                if linha.strip():
+                    doc.add_paragraph(linha.strip())
+        else:
+            doc.add_paragraph("[PENDENTE DE PREENCHIMENTO]")
+    arquivo = io.BytesIO()
+    doc.save(arquivo)
+    st.download_button("Baixar rascunho DOCX", arquivo.getvalue(), "TRLP_rascunho_nao_validado.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+pacote = {"formato": "TRLP-0.2", "dados": p}
+st.sidebar.download_button("Salvar trabalho (.json)", json.dumps(pacote, ensure_ascii=False, indent=2).encode("utf-8"), "TRLP_trabalho.json", mime="application/json")
