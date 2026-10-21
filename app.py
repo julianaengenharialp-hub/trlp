@@ -1,4 +1,3 @@
-"""TRLP 0.3: protótipo de formulário guiado; exige revisão antes da licitação."""
 import io, json, re, zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -6,193 +5,188 @@ import streamlit as st
 from docx import Document
 from docx.shared import Cm, Pt
 
-st.set_page_config(page_title='TRLP | Gerador orientado', page_icon='📄', layout='wide')
-TITULOS=['OBJETO','JUSTIFICATIVA E OBJETIVO DA CONTRATAÇÃO','DESCRIÇÃO DA SOLUÇÃO COMO UM TODO','REQUISITOS DA CONTRATAÇÃO','FORMA DE EXECUÇÃO DO OBJETO','GESTÃO DO CONTRATO','MEDIÇÃO E PAGAMENTO','SELEÇÃO DO FORNECEDOR','ESTIMATIVA DO PREÇO','ADEQUAÇÃO ORÇAMENTÁRIA','DISPOSIÇÕES FINAIS']
-MODELO=Path(__file__).with_name('modelo_tr.odt')
-TEXT='{urn:oasis:names:tc:opendocument:xmlns:text:1.0}'
-OFFICE='{urn:oasis:names:tc:opendocument:xmlns:office:1.0}'
-
+st.set_page_config(page_title="TRLP | Elaboração orientada", layout="wide")
+TITULOS = ["OBJETO","JUSTIFICATIVA E OBJETIVO DA CONTRATAÇÃO","DESCRIÇÃO DA SOLUÇÃO COMO UM TODO","REQUISITOS DA CONTRATAÇÃO","FORMA DE EXECUÇÃO DO OBJETO","GESTÃO DO CONTRATO","MEDIÇÃO E PAGAMENTO","SELEÇÃO DO FORNECEDOR","ESTIMATIVA DO PREÇO","ADEQUAÇÃO ORÇAMENTÁRIA","DISPOSIÇÕES FINAIS"]
+ARQUIVO = Path(__file__).with_name("modelo_tr.odt")
+T = "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}"
+O = "{urn:oasis:names:tc:opendocument:xmlns:office:1.0}"
+NUM = re.compile(r"^(\d+(?:\.\d+)+)\.?\s+(.+)$")
+CAP = re.compile(r"^(\d{1,2})\.\s+([A-ZÁÉÍÓÚÃÕÇÊÔÜ0-9 /–-]+)$")
+EXEMPLOS = ("campo de futebol","quadra de basquete","pista de caminhada","parquinho infantil","jardim do caju","secretaria de esportes","projeto padrão federal")
+INSTRUCOES = ("observação:","o texto abaixo","texto abaixo","modelo 1:","modelo 2:","modelo 3:","caso seja autorizado","caso não tenha memorial","segue abaixo exemplo","analisar cada caso","aqui é um exemplo","deve ser analisado cada caso","se houver outras normas","descrever detalhadamente","caso tenha havido o etp")
+def limpar(s): return " ".join(s.split())
 @st.cache_data
-def ler_modelo(raw):
-    with zipfile.ZipFile(io.BytesIO(raw)) as z: root=ET.fromstring(z.read('content.xml'))
-    body=root.find(f'.//{OFFICE}body/{OFFICE}text')
-    if body is None:return []
-    def extract(n):
-        if n.tag==OFFICE+'annotation':return ''
-        s=n.text or ''
-        for c in n:s+=extract(c)+(c.tail or '')
+def carregar(b):
+    with zipfile.ZipFile(io.BytesIO(b)) as z:
+        root = ET.fromstring(z.read("content.xml"))
+    body = root.find(f".//{O}body/{O}text")
+    def texto(node):
+        if node.tag in (O+"annotation",O+"annotation-end"): return ""
+        s=node.text or ""
+        for child in node: s+=texto(child)+(child.tail or "")
         return s
-    return [' '.join(extract(p).split()) for p in body.iter() if p.tag in (TEXT+'p',TEXT+'h') and extract(p).strip()]
-
-if 'dados' not in st.session_state:st.session_state.dados={}
-if 'edicoes' not in st.session_state:st.session_state.edicoes={}
-d=st.session_state.dados
-
-def sel(k,label,opcoes,help=None):
-    return st.selectbox(label,opcoes,key='v_'+k,help=help)
-def txt(k,label,placeholder='',required=False):
-    return st.text_input(label,key='v_'+k,placeholder=placeholder)
-def area(k,label,placeholder='',height=95):
-    return st.text_area(label,key='v_'+k,placeholder=placeholder,height=height)
-def yn(k,label):return sel(k,label,['Selecione','Sim','Não'])
-def linha(n,conteudo):return f'{n}. {conteudo}' if conteudo else ''
-
-st.title('TRLP | Elaboração orientada de Termos de Referência')
-st.caption('Versão 0.3 experimental. O sistema monta um rascunho e não certifica conformidade com o modelo municipal nem com a Lei 14.133/2021.')
-if MODELO.exists():
-    original=ler_modelo(MODELO.read_bytes())
-    st.sidebar.success('Modelo municipal carregado automaticamente')
-else:
-    original=[]
-    st.sidebar.error('Arquivo modelo_tr.odt não encontrado na raiz do repositório.')
-st.sidebar.info('O arquivo de trabalho pode ser exportado e importado. Nenhum dado é gravado no GitHub.')
-imp=st.sidebar.file_uploader('Retomar trabalho (.json)',type='json')
-if imp and st.sidebar.button('Importar arquivo de trabalho'):
+    return [limpar(texto(p)) for p in body.iter() if p.tag in (T+"p",T+"h") and limpar(texto(p))]
+def categorizar(linhas):
+    caps={n:[] for n in range(1,12)}
+    cap=None; grupo=None
+    for s in linhas:
+        m=CAP.match(s)
+        if m and int(m.group(1)) in caps and m.group(2).strip() in TITULOS:
+            cap=int(m.group(1));grupo=None;continue
+        if cap is None:continue
+        low=s.lower()
+        if any(x in low for x in INSTRUCOES): 
+            if low.startswith("modelo "):grupo=low
+            continue
+        n=NUM.match(s)
+        if n:
+            numero,conteudo=n.groups()
+            if int(numero.split(".")[0])!=cap:continue
+            caps[cap].append({"id":f"{cap}:{len(caps[cap])}","numero":numero,"texto":conteudo,"grupo":grupo})
+        elif caps[cap] and s and not any(x in low for x in EXEMPLOS):
+            # Continuação não numerada: mantida somente quando for um texto claramente integrante do item.
+            if s[0].islower() or s.startswith(("a)","b)","c)","d)")):
+                caps[cap][-1]["texto"]+=" "+s
+    return caps
+def suspeito(item):
+    t=item["texto"].lower()
+    return any(x in t for x in EXEMPLOS) or "________________" in t or "[descrever" in t or "120 (cento" in t or "educ.suprimentos@" in t or "3269-7800" in t or "contados da data das respectivas medições" in t
+def inicial(item):
+    return "Revisar / adaptar" if suspeito(item) else "Manter texto do modelo"
+def get(k,default=""):
+    return st.session_state.get(k,default)
+def campo(label,key,valor=""):
+    return st.text_input(label,key=key,value=valor) if key not in st.session_state else st.text_input(label,key=key)
+def lista(label,key,opcoes):
+    return st.selectbox(label,opcoes,key=key)
+def escolha(label,key):
+    return lista(label,key,["Selecione","Sim","Não"])
+def registro():
+    return {k:v for k,v in st.session_state.items() if k.startswith(("cfg_","opt_","edit_","why_"))}
+def trocar_numero(s,numero):
+    return f"{numero}. {s.strip()}"
+st.title("TRLP | Termos de Referência")
+st.caption("Versão 0.4 experimental | Cláusulas reutilizáveis, opções de aplicação e edição pontual. Revisão técnica e jurídica permanece necessária.")
+if not ARQUIVO.exists():
+    st.error("Coloque o arquivo modelo_tr.odt na raiz do repositório.");st.stop()
+linhas=carregar(ARQUIVO.read_bytes())
+caps=categorizar(linhas)
+st.sidebar.success("Modelo ODT carregado")
+st.sidebar.caption("Os exemplos do modelo não são presumidos obrigatórios. Nenhum dado é salvo no GitHub.")
+up=st.sidebar.file_uploader("Retomar trabalho (.json)",type="json")
+if up and st.sidebar.button("Importar"):
     try:
-        obj=json.load(imp)
-        if obj.get('formato')!='trlp-03':raise ValueError('Arquivo incompatível com a versão 0.3')
-        for k,v in obj.get('campos',{}).items():st.session_state['v_'+k]=v
-        st.session_state.edicoes=obj.get('edicoes',{})
+        dados=json.load(up)
+        if dados.get("formato")!="trlp-04":raise ValueError("Formato de arquivo incompatível.")
+        for k,v in dados["campos"].items():st.session_state[k]=v
         st.rerun()
     except Exception as e:st.sidebar.error(str(e))
-
-aba1,aba2,aba3=st.tabs(['1. Configuração','2. Perguntas por assunto','3. Prévia e exportação'])
-with aba1:
-    a,b=st.columns(2)
-    with a:
-        unidade=txt('unidade','Unidade solicitante','Secretaria de Obras e Infraestrutura')
-        objeto=area('objeto','Objeto específico da contratação (informação técnica indispensável)','Ex.: execução de recapeamento asfáltico em ...')
-        natureza=sel('natureza','Natureza',['Selecione','Obra de engenharia','Serviço de engenharia','Outro serviço'])
-        regime=sel('regime','Regime de execução',['Selecione','Empreitada por preço global','Empreitada por preço unitário','Tarefa','Outro / requer análise'])
-    with b:
-        etp=yn('etp','Foi elaborado ETP?')
-        memorial=yn('memorial','Existe memorial descritivo separado?')
-        projetos=yn('projetos','Há projetos e documentos técnicos anexos?')
-        sub=yn('sub','Será admitida subcontratação?')
-        visita=yn('visita','Será prevista visita técnica facultativa?')
-        garantia=yn('garantia','Será exigida garantia contratual (arts. 96 e seguintes)?')
-    st.info('As escolhas devem ser tecnicamente justificadas pelo responsável. Os regimes e textos exemplificativos do modelo não são automaticamente aplicáveis a qualquer contratação.')
-with aba2:
-    sec=st.selectbox('Capítulo para preencher',range(1,12),format_func=lambda n:f'{n}. {TITULOS[n-1]}')
-    st.subheader(f'{sec}. {TITULOS[sec-1]}')
-    if sec==1:
-        complemento=area('escopo','Quais serviços/etapas compõem o objeto? (apenas quando necessário)','Descreva as parcelas relevantes do escopo')
-    elif sec==2:
-        necessidade=area('necessidade','Qual problema ou necessidade pública a contratação atenderá?','Informação técnica indispensável')
-        resultado=area('resultado','Qual resultado concreto é esperado?')
-    elif sec==3:
-        etapas=area('etapas','Quais etapas ou atividades integram a solução?')
-        acessorios=st.multiselect('Atividades acessórias aplicáveis',['Transporte','Instalação','Montagem','Testes e ensaios','Limpeza final','Destinação de resíduos','Treinamento','Assistência técnica','Outras'],key='v_acessorios')
-    elif sec==4:
-        normas=area('normas','Normas técnicas específicas adicionais, se necessárias')
-        exigencias=area('exigencias','Requisitos técnicos específicos indispensáveis')
-        if sub=='Sim':parcelas=area('parcelas','Quais parcelas poderão ser subcontratadas?')
-        if garantia=='Sim':garantia_det=area('garantia_det','Condições e percentual da garantia, conforme definição da Administração')
-        if visita=='Sim':responsavel_visita=txt('responsavel_visita','Servidor responsável pela visita técnica')
-    elif sec==5:
-        prazo=txt('prazo','Prazo de execução (dias)','Ex.: 120')
-        inicio=sel('inicio','Marco inicial do prazo',['Selecione','Emissão da Ordem de Serviço','Assinatura do contrato','Outro (descrever)'])
-        if inicio.startswith('Outro'):txt('inicio_outro','Descreva o marco inicial')
-        medicao=sel('medicao','Critério de medição',['Selecione','Medições periódicas por serviços executados','Por etapas concluídas','Após conclusão integral','Outro (exige justificativa)'])
-        detalhes_exec=area('detalhes_exec','Particularidades de execução não cobertas pelos anexos (se houver)')
-    elif sec==6:
-        gestor=txt('gestor','Gestor do contrato')
-        fiscal=txt('fiscal','Fiscal técnico')
-        fiscaladm=txt('fiscaladm','Fiscal administrativo')
-    elif sec==7:
-        pagamento=sel('pagamento','Forma de pagamento',['Selecione','Conforme medições aprovadas','Após conclusão e recebimento','Por etapas previstas no cronograma','Outra (exige descrição)'])
-        prazo_pg=txt('prazo_pg','Prazo de pagamento, conforme regras municipais (dias)')
-        if pagamento.startswith('Outra'):area('pg_outro','Descreva a forma de pagamento')
-    elif sec==8:
-        criterio=sel('criterio','Critério de julgamento pretendido',['Selecione','Menor preço','Maior desconto','Outro (exige análise)'])
-        habilitacao=area('habilitacao','Exigências específicas de qualificação técnica (quando cabíveis)')
-    elif sec==9:
-        metodo=sel('metodo','Base da estimativa',['Selecione','Tabelas de custos','Pesquisa de preços/orçamentos','Composição própria','Outra metodologia'])
-        estimativa=txt('estimativa','Valor total estimado (R$)')
-        fonte=area('fonte','Identificação das fontes e documentos que instruem a estimativa')
-    elif sec==10:
-        dotacao=txt('dotacao','Dotação orçamentária / classificação informada pelo setor competente')
-        exercicio=txt('exercicio','Exercício orçamentário')
-    else:
-        disposicoes=area('disposicoes','Informações adicionais necessárias (se houver)')
-    with st.expander('Consultar o modelo original (somente referência)'):
-        if original:
-            pos=next((i for i,t in enumerate(original) if re.match(rf'^{sec}\.\s+[A-ZÁÉÍÓÚÃÕÇ]',t)),None)
-            end=next((i for i in range(pos+1,len(original)) if re.match(rf'^{sec+1}\.\s+[A-ZÁÉÍÓÚÃÕÇ]',original[i])),len(original)) if pos is not None else 0
-            st.text('\n\n'.join(original[pos:min(end,pos+65)]) if pos is not None else 'Capítulo não localizado automaticamente.')
-        else:st.warning('Modelo indisponível.')
-
-# Geração de texto: somente cláusulas explicitamente mapeadas, não reproduz exemplos específicos.
-def v(k):return st.session_state.get('v_'+k,'')
-partes={i:[] for i in range(1,12)}
-if v('objeto'):partes[1].append(linha('1.1',f'O presente Termo de Referência tem por objeto {v("objeto").strip().rstrip(".")}.' ))
-if v('escopo'):partes[1].append(linha('1.2',v('escopo')))
-if v('necessidade'):partes[2].append(v('necessidade'))
-if v('resultado'):partes[2].append('Resultado esperado: '+v('resultado'))
-if v('etapas'):partes[3].append(linha('3.1',v('etapas')))
-if v('acessorios'):partes[3].append(linha('3.2','Atividades acessórias previstas: '+', '.join(v('acessorios'))+'.'))
-if v('exigencias'):partes[4].append(linha('4.1',v('exigencias')))
-if v('normas'):partes[4].append(linha('4.2','Normas técnicas adicionais: '+v('normas')))
-if v('sub')=='Não':partes[4].append('4.9.1. Não é admitida a subcontratação do objeto contratual sem prévia autorização da contratante.')
-if v('sub')=='Sim':partes[4].append('4.9.1. A subcontratação dependerá de prévia autorização da Administração, observadas as parcelas indicadas: '+(v('parcelas') or '[INFORMAR PARCELAS]'))
-if v('garantia')=='Sim':partes[4].append('4.10.1. Será exigida garantia da contratação, nos termos dos arts. 96 e seguintes da Lei nº 14.133/2021. '+v('garantia_det'))
-if v('visita')=='Sim':partes[4].append('4.11. Visita técnica facultativa, com acompanhamento de '+(v('responsavel_visita') or '[INFORMAR RESPONSÁVEL]')+'. Condições de agendamento e declaração substitutiva deverão ser conferidas.')
-reg=v('regime')
-if reg=='Empreitada por preço unitário':
-    partes[5]+= ['5.1.1. A execução do objeto ocorrerá sob o regime de empreitada por preço unitário, nos termos do art. 46, inciso II, da Lei Federal nº 14.133/2021.','5.1.2. Os serviços serão remunerados de acordo com os quantitativos efetivamente executados e medidos pela fiscalização, aplicando-se os preços unitários constantes da proposta da contratada.','5.1.3. Eventuais variações quantitativas decorrentes das condições verificadas durante a execução deverão observar as disposições legais e contratuais aplicáveis, mediante justificativa técnica e formalização nos autos do processo.']
-elif reg=='Tarefa':
-    partes[5]+= ['5.1.1. A execução do objeto ocorrerá sob o regime de tarefa, nos termos do art. 46, inciso III, da Lei Federal nº 14.133/2021, mediante contratação de mão de obra para pequenos trabalhos por preço certo, com ou sem fornecimento de materiais.','5.1.2. Os serviços serão executados de acordo com as necessidades da Administração, observadas as especificações técnicas e as condições estabelecidas no contrato, sendo remunerados conforme a efetiva execução das atividades demandadas.']
-elif reg=='Empreitada por preço global':
-    partes[5].append('5.1.1. A execução do objeto dar-se-á de forma indireta, sob o regime de empreitada por preço global. [COMPLEMENTAR A JUSTIFICATIVA TÉCNICA ESPECÍFICA; o modelo municipal contém exemplo de projeto padrão federal que não é universal.]')
-if v('prazo'):
-    marco=v('inicio_outro') if v('inicio').startswith('Outro') else v('inicio')
-    partes[5].append(f'5.2. Prazo de execução: {v("prazo")} dias, contados de {marco or "[DEFINIR MARCO INICIAL]"}.')
-if v('detalhes_exec'):partes[5].append('Condições específicas de execução: '+v('detalhes_exec'))
-if v('medicao')!='Selecione' and v('medicao'):partes[5].append('Critério de medição informado: '+v('medicao')+'. [CONFERIR ADEQUAÇÃO AO ITEM 5.15.3 DO MODELO.]')
-for numero,k,t in [('6.1.1','gestor','Gestor do contrato'),('6.1.2','fiscal','Fiscal técnico do contrato'),('6.1.3','fiscaladm','Fiscal administrativo do contrato')]:
-    if v(k):partes[6].append(f'{numero}. {t}: {v(k)}.')
-if v('pagamento') not in ('','Selecione'):partes[7].append('Forma de pagamento proposta: '+(v('pg_outro') if v('pagamento').startswith('Outra') else v('pagamento'))+'.')
-if v('prazo_pg'):partes[7].append('Prazo de pagamento informado: '+v('prazo_pg')+' dias. [CONFERIR REGRA MUNICIPAL.]')
-if v('criterio') not in ('','Selecione'):partes[8].append('Critério de julgamento proposto: '+v('criterio')+'.')
-if v('habilitacao'):partes[8].append('Qualificação técnica: '+v('habilitacao'))
-if v('metodo') not in ('','Selecione'):partes[9].append('Metodologia de estimativa: '+v('metodo')+'.')
-if v('estimativa'):partes[9].append('Valor estimado: R$ '+v('estimativa')+'.')
-if v('fonte'):partes[9].append('Fontes e documentos: '+v('fonte'))
-if v('dotacao'):partes[10].append('Dotação orçamentária: '+v('dotacao'))
-if v('exercicio'):partes[10].append('Exercício: '+v('exercicio'))
-if v('disposicoes'):partes[11].append(v('disposicoes'))
-
-with aba3:
-    pend=[]
-    for k,n in [('unidade','Unidade solicitante'),('objeto','Objeto'),('natureza','Natureza'),('regime','Regime'),('necessidade','Justificativa da necessidade'),('etapas','Descrição da solução'),('prazo','Prazo de execução'),('gestor','Gestor'),('fiscal','Fiscal técnico'),('metodo','Metodologia de estimativa'),('dotacao','Dotação orçamentária')]:
-        if not v(k) or v(k)=='Selecione':pend.append(n)
-    for k,n in [('etp','ETP'),('memorial','Memorial'),('sub','Subcontratação'),('visita','Visita técnica'),('garantia','Garantia contratual')]:
-        if v(k) in ('','Selecione'):pend.append('Decisão: '+n)
-    if v('sub')=='Sim' and not v('parcelas'):pend.append('Parcelas subcontratáveis')
-    if v('visita')=='Sim' and not v('responsavel_visita'):pend.append('Responsável pela visita')
-    if pend:st.warning('Pendências identificadas: '+', '.join(pend))
-    else:st.success('Campos principais preenchidos. Ainda é necessária conferência integral do modelo e da legislação.')
-    st.info('Esta versão NÃO reproduz todas as cláusulas do modelo. Capítulos sem regras mapeadas permanecem incompletos. Exportação somente como rascunho.')
-    for i,titulo in enumerate(TITULOS,1):
-        with st.expander(f'{i}. {titulo}',expanded=(i==1)):
-            base='\n\n'.join(partes[i])
-            atual=st.text_area('Texto gerado (editável)',value=st.session_state.edicoes.get(str(i),base),height=170,key=f'edit_{i}')
-            st.session_state.edicoes[str(i)]=atual
-            if st.button('Restaurar texto gerado',key=f'reset_{i}'):
-                st.session_state.edicoes[str(i)]=base
-                st.rerun()
-    campos={k[2:]:val for k,val in st.session_state.items() if k.startswith('v_')}
-    pacote={'formato':'trlp-03','campos':campos,'edicoes':st.session_state.edicoes}
-    st.download_button('Salvar trabalho (.json)',json.dumps(pacote,ensure_ascii=False,indent=2).encode('utf-8'),'trabalho_trlp.json','application/json')
-    doc=Document(); secao=doc.sections[0];secao.top_margin=Cm(2.5);secao.bottom_margin=Cm(2.5)
-    doc.add_heading('TERMO DE REFERÊNCIA — RASCUNHO INCOMPLETO',0)
-    doc.add_paragraph('UNIDADE SOLICITANTE: '+v('unidade'))
-    for i,titulo in enumerate(TITULOS,1):
-        doc.add_heading(f'{i}. {titulo}',level=1)
-        conteudo=st.session_state.edicoes.get(str(i),'\n\n'.join(partes[i]))
-        for p in conteudo.split('\n'):
-            if p.strip():doc.add_paragraph(p)
-        if not conteudo.strip():doc.add_paragraph('[CAPÍTULO PENDENTE DE ELABORAÇÃO]')
-    doc.add_paragraph('DOCUMENTO EXPERIMENTAL: revisar integralmente conforme modelo oficial antes de encaminhar à licitação.')
-    buf=io.BytesIO();doc.save(buf)
-    st.download_button('Baixar rascunho DOCX',buf.getvalue(),'TRLP_rascunho_v03.docx','application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+a,b,c=st.tabs(["1. Configuração","2. Cláusulas por capítulo","3. Conferência e exportação"])
+with a:
+    x,y=st.columns(2)
+    with x:
+        campo("Unidade solicitante","cfg_unidade","Secretaria de Obras e Infraestrutura")
+        campo("Objeto da contratação (resumo indispensável)","cfg_objeto")
+        lista("Natureza","cfg_natureza",["Selecione","Obra de engenharia","Serviço de engenharia","Outro serviço"])
+        lista("Regime de execução","cfg_regime",["Selecione","Empreitada por preço global","Empreitada por preço unitário","Tarefa","Outro / análise necessária"])
+    with y:
+        escolha("Foi elaborado ETP?","cfg_etp")
+        escolha("Existe memorial descritivo anexo?","cfg_memorial")
+        escolha("Será admitida subcontratação?","cfg_sub")
+        escolha("Será exigida garantia contratual?","cfg_garantia")
+        escolha("Será prevista visita técnica?","cfg_visita")
+        campo("Prazo de execução (dias)","cfg_prazo")
+    st.info("Nenhuma escolha de natureza técnica é presumida. Preencha somente os dados específicos; as cláusulas são tratadas na aba seguinte.")
+with b:
+    sec=st.selectbox("Capítulo",range(1,12),format_func=lambda i:f"{i}. {TITULOS[i-1]}")
+    st.subheader(f"{sec}. {TITULOS[sec-1]}")
+    st.caption("Manter = usar a redação sugerida; adaptar = editar somente esta cláusula; não aplicar = registrar para conferência. Itens do exemplo exigem revisão.")
+    itens=caps[sec]
+    if not itens:st.warning("Nenhum subitem numerado foi identificado automaticamente neste capítulo. É necessária análise manual.")
+    for item in itens:
+        num=item["numero"];ident=item["id"];texto=item["texto"]
+        if sec==5 and num.startswith("5.1.") and item["grupo"] and get("cfg_regime")!="Selecione":
+            g=item["grupo"]
+            escolhido=get("cfg_regime").lower()
+            if ("global" in g and "global" not in escolhido) or ("unitário" in g and "unitário" not in escolhido) or ("tarefa" in g and "tarefa" not in escolhido):
+                continue
+        if num=="4.10.1" and get("cfg_garantia")=="Não":continue
+        if num.startswith("4.11.") and get("cfg_visita")=="Não":continue
+        with st.expander(f"{num}. {texto[:90]}{'…' if len(texto)>90 else ''}"):
+            st.caption("Texto extraído do modelo municipal:")
+            st.write(texto)
+            if suspeito(item):st.warning("Contém exemplo, campo variável ou condição que exige análise. Não reutilizar sem conferir.")
+            key="opt_"+ident
+            opcoes=["Manter texto do modelo","Revisar / adaptar","Não aplicar (justificar)"]
+            if key not in st.session_state:st.session_state[key]=inicial(item)
+            modo=st.radio("Tratamento",opcoes,key=key,horizontal=True)
+            if modo=="Revisar / adaptar":
+                ek="edit_"+ident
+                if ek not in st.session_state:st.session_state[ek]=texto
+                st.text_area("Redação desta cláusula",key=ek,height=125)
+                st.text_input("Motivo da alteração (para relatório interno)",key="why_"+ident)
+            elif modo.startswith("Não aplicar"):
+                st.text_input("Motivo da não aplicação (para relatório interno)",key="why_"+ident)
+    st.divider()
+    st.text_area("Complemento técnico do capítulo (somente se necessário)",key=f"cfg_extra_{sec}",height=90)
+def montar():
+    secoes={};alertas=[];mudancas=[]
+    for n in range(1,12):
+        trechos=[]
+        for item in caps[n]:
+            numero=item["numero"];ident=item["id"]
+            if n==5 and numero.startswith("5.1.") and item["grupo"]:
+                regime=get("cfg_regime").lower();g=item["grupo"]
+                if regime=="selecione" or not regime:continue
+                if not (("global" in regime and "global" in g) or ("unitário" in regime and "unitário" in g) or ("tarefa" in regime and "tarefa" in g)):continue
+            if numero=="4.10.1" and get("cfg_garantia")=="Não":continue
+            if numero.startswith("4.11.") and get("cfg_visita")=="Não":continue
+            modo=get("opt_"+ident,inicial(item))
+            if modo.startswith("Não aplicar"):
+                mudancas.append((numero,"Não aplicado",get("why_"+ident)))
+                if not get("why_"+ident).strip():alertas.append(f"{numero}: justificar não aplicação")
+                continue
+            txt=get("edit_"+ident,item["texto"]) if modo=="Revisar / adaptar" else item["texto"]
+            if modo=="Revisar / adaptar":
+                mudancas.append((numero,"Adaptado",get("why_"+ident)))
+                if not get("why_"+ident).strip():alertas.append(f"{numero}: justificar alteração")
+            if suspeito(item) and modo=="Manter texto do modelo":alertas.append(f"{numero}: possível texto exemplificativo mantido")
+            if not txt.strip():alertas.append(f"{numero}: texto vazio");continue
+            trechos.append(trocar_numero(txt,numero))
+        if get(f"cfg_extra_{n}").strip():trechos.append("COMPLEMENTO TÉCNICO (revisar posicionamento e numeração): "+get(f"cfg_extra_{n}").strip())
+        secoes[n]=trechos
+    return secoes,alertas,mudancas
+with c:
+    secoes,alertas,mudancas=montar()
+    for chave,rotulo in [("cfg_unidade","Unidade solicitante"),("cfg_objeto","Objeto"),("cfg_natureza","Natureza"),("cfg_regime","Regime de execução"),("cfg_etp","ETP"),("cfg_memorial","Memorial"),("cfg_sub","Subcontratação"),("cfg_garantia","Garantia"),("cfg_visita","Visita técnica")]:
+        if get(chave) in ("","Selecione"):alertas.append(f"Informar: {rotulo}")
+    if get("cfg_sub")=="Sim":alertas.append("Conferir e delimitar parcelas subcontratáveis nos itens 4.9 e 5.5")
+    if get("cfg_prazo"):alertas.append("Conferir prazo de execução no item 5.2: o exemplo pode conter prazo diferente")
+    if alertas:
+        st.warning(f"{len(alertas)} pontos para conferir")
+        with st.expander("Ver pendências e alertas",expanded=True):
+            for x in dict.fromkeys(alertas):st.write("• "+x)
+    else:st.success("Nenhum alerta automático identificado. Isso não equivale a validação jurídica.")
+    st.caption(f"Cláusulas alteradas ou não aplicadas: {len(mudancas)}")
+    for numero,tipo,motivo in mudancas:st.write(f"**{numero}** · {tipo} · {motivo or 'Justificativa pendente'}")
+    for n,trechos in secoes.items():
+        with st.expander(f"{n}. {TITULOS[n-1]} ({len(trechos)} trechos)",expanded=n==1):
+            st.text("\n\n".join(trechos) or "[CAPÍTULO SEM TEXTO GERADO]")
+    dados={"formato":"trlp-04","campos":registro()}
+    st.download_button("Salvar trabalho (.json)",json.dumps(dados,ensure_ascii=False,indent=2).encode(),"trabalho_trlp_v04.json","application/json")
+    doc=Document()
+    doc.sections[0].top_margin=Cm(2.3);doc.sections[0].bottom_margin=Cm(2.3)
+    doc.add_heading("TERMO DE REFERÊNCIA | RASCUNHO PARA CONFERÊNCIA",0)
+    doc.add_paragraph("UNIDADE SOLICITANTE: "+get("cfg_unidade"))
+    doc.add_paragraph("OBJETO INFORMADO: "+get("cfg_objeto"))
+    for n,trechos in secoes.items():
+        doc.add_heading(f"{n}. {TITULOS[n-1]}",level=1)
+        for trecho in trechos:doc.add_paragraph(trecho)
+        if not trechos:doc.add_paragraph("[CAPÍTULO A COMPLETAR]")
+    doc.add_page_break();doc.add_heading("RELATÓRIO INTERNO DE CONFERÊNCIA",1)
+    for x in dict.fromkeys(alertas):doc.add_paragraph("PENDÊNCIA: "+x)
+    for numero,tipo,motivo in mudancas:doc.add_paragraph(f"{numero}: {tipo}; justificativa: {motivo or 'não informada'}")
+    doc.add_paragraph("RASCUNHO EXPERIMENTAL: conferir integralmente contra o modelo municipal antes de encaminhar à licitação.")
+    out=io.BytesIO();doc.save(out)
+    st.download_button("Baixar rascunho DOCX",out.getvalue(),"TRLP_rascunho_v04.docx","application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+st.sidebar.warning("Protótipo: a extração automática ainda não distingue todas as instruções, exemplos, listas e alternativas. Não usar o DOCX diretamente em licitação.")
